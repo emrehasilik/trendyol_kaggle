@@ -1,0 +1,9 @@
+data/
+models/
+output/
+artifacts/
+__pycache__/
+*.pyc
+*.pt
+*.npy
+*.npz
