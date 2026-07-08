@@ -23,6 +23,8 @@ _V = next((a for a in sys.argv[1:] if re.fullmatch(r"v\d+", a)), "")
 SUFFIX = f"_{_V}" if _V else ""
 TRAIN_LOG = C.ARTIFACTS_DIR / f"train_ce{SUFFIX}.log"
 INFER_LOG = C.ARTIFACTS_DIR / f"infer_ce{SUFFIX}.log"
+# v4 = tek full-data model (fold yok); digerleri 3-fold
+N_FOLDS = 1 if _V == "v4" else C.CE_N_FOLDS
 
 STEP_RE = re.compile(r"fold (\d+) e(\d+) step (\d+)/(\d+) loss=([\d.]+) \((\d+)s\)")
 OOF_PROG_RE = re.compile(r"oof f(\d+) (\d+)/(\d+)")
@@ -66,7 +68,7 @@ def _fold_trained(text, f):
 
 def _train_frac(text):
     """Egitim scriptinin genel ilerlemesi (egitim + OOF + proxy fazlari dahil)."""
-    n = C.CE_N_FOLDS
+    n = N_FOLDS
     total = 0.0
     for f in range(n):
         frac = 0.0
@@ -105,7 +107,7 @@ def _train_eta(text):
     rate = step / max(secs, 1)
     fold_remain = (total - step) / rate
     score_pay = (total / rate) * (1 - W_TRAIN) / W_TRAIN  # OOF+proxy payi
-    folds_left = C.CE_N_FOLDS - fold - 1
+    folds_left = N_FOLDS - fold - 1
     total_remain = fold_remain + score_pay + folds_left * (total / rate + score_pay)
     return rate, fold_remain, total_remain
 
@@ -142,6 +144,12 @@ def summarize():
         print(_bar("EGITIM", 100.0) + "  TAMAMLANDI")
         print(f"    OOF macro_f1: {oofs}")
         print(f"    LB-proxy f1={tfinal.group(2)} (en iyi esik {tfinal.group(1)})")
+    elif not STEP_RE.search(ttext) and "ornek" in ttext:
+        print(_bar("EGITIM", 0.0) + "  BASLADI - isinma fazi")
+        print("    ilk ilerleme satiri ~500. adimda yazilir (mdeberta'da ~10 dk);"
+              " GPU kullanimiyla dogrulayin: nvidia-smi")
+        _staleness(TRAIN_LOG, now)
+        return
     else:
         print(_bar("EGITIM", 100 * _train_frac(ttext)) +
               "  (egitim + OOF/proxy skorlama dahil)")
@@ -162,7 +170,7 @@ def summarize():
         print(_bar("INFERENCE", 100.0) + "  TAMAMLANDI")
         print(f"    submission: {ifinal.group(1)}")
     elif itext:
-        n = C.CE_N_FOLDS
+        n = N_FOLDS
         done = {int(f) for f in TEST_DONE_RE.findall(itext)}
         m = _last(TEST_PROG_RE, itext)
         cur = 0.0
