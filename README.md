@@ -6,6 +6,18 @@ Veri: 250k pozitif eğitim çifti, 50.153 terim, 3.359.679 test çifti.
 > Not: `data/`, `models/`, `output/`, `artifacts/` klasörleri boyut nedeniyle (~4.6GB, model
 > dosyaları 350MB+) bu repoya dahil edilmedi. Burada sadece pipeline kodu bulunuyor.
 
+> **Proje geçmişi, denenen tüm yöntemler ve güncel plan: [HANDOFF.md](HANDOFF.md).**
+
+## v6 — Colab eğitimi (güncel aşama)
+
+Büyük gövde (`BAAI/bge-reranker-v2-m3`) eğitimi Google Colab'da (A100/L4) yapılır:
+[notebooks/colab_v6.ipynb](notebooks/colab_v6.ipynb) uçtan uca sürücüdür (Drive
+checkpoint'li, oturum kopmasına dayanıklı). Kurulum adımları notebook'un başında ve
+HANDOFF.md bölüm 7'de. İlgili scriptler: `src/tokenize_ce_cache_v6.py`,
+`src/train_ce_v6.py`, `src/infer_ce_v6.py`, `src/build_dataset_v7.py`. Yerel
+davranışı bozmadan ortam değişkenleriyle taşınabilirlik: `TK2_WORK`, `TK2_DATA`,
+`TK2_MODEL`, `TK2_HF_CACHE` (bkz. `src/config.py`).
+
 ## Pipeline
 
 1. **Negatif örnekleme** (`src/build_dataset.py`, `src/mine_ann.py`) — eğitim verisi sadece

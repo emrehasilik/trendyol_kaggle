@@ -107,6 +107,12 @@ def main():
         model.load_state_dict(torch.load(ckpt, map_location=DEVICE,
                                          weights_only=True))
     else:
+        # 250K-vocab embedding tablosu (192M param) donduruluyor: optimizer
+        # durumundan ~2.3GB tasarruf -> 6GB'ta paylasimli-RAM sizintisi biter.
+        # (ilk kosuda sizinti 0.96 -> 0.31 adim/sn dusurmustu)
+        model.roberta.embeddings.requires_grad_(False)
+        # GC + donmus embedding: encoder'a gradyan akmasi icin sart
+        model.enable_input_require_grads()
         model.gradient_checkpointing_enable()
         ds_tr = PairDataset(t_rows, i_rows, labels, cache)
         dl = DataLoader(ds_tr, batch_size=V4_BATCH, shuffle=True, num_workers=0,
@@ -114,8 +120,9 @@ def main():
                         pin_memory=True, drop_last=True)
         steps_per_epoch = len(dl) // V4_ACCUM
         total_steps = steps_per_epoch * V4_EPOCHS
-        opt = torch.optim.AdamW(model.parameters(), lr=V4_LR,
-                                weight_decay=C.CE_WEIGHT_DECAY)
+        opt = torch.optim.AdamW(
+            [p for p in model.parameters() if p.requires_grad],
+            lr=V4_LR, weight_decay=C.CE_WEIGHT_DECAY)
         sched = get_linear_schedule_with_warmup(
             opt, int(total_steps * V4_WARMUP), total_steps)
         loss_fn = torch.nn.BCEWithLogitsLoss()

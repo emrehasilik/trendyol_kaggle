@@ -26,7 +26,8 @@ INFER_LOG = C.ARTIFACTS_DIR / f"infer_ce{SUFFIX}.log"
 # v4 = tek full-data model (fold yok); digerleri 3-fold
 N_FOLDS = 1 if _V == "v4" else C.CE_N_FOLDS
 
-STEP_RE = re.compile(r"fold (\d+) e(\d+) step (\d+)/(\d+) loss=([\d.]+) \((\d+)s\)")
+STEP_RE = re.compile(r"fold (\d+) e(\d+) step (\d+)/(\d+) loss=([\d.]+)"
+                     r"(?: skip=\d+)? \((\d+)s\)")
 OOF_PROG_RE = re.compile(r"oof f(\d+) (\d+)/(\d+)")
 OOF_DONE_RE = re.compile(r"fold (\d+) OOF macro_f1@0\.5 = ([\d.]+)")
 PROXY_PROG_RE = re.compile(r"proxy f(\d+) (\d+)/(\d+)")

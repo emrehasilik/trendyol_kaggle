@@ -1,0 +1,155 @@
+"""Faz 8: cross-encoder v2 egitimi (pseudo-label + CE-onayli hard negatifler).
+
+train_ce.py ile ayni mimari ve hiperparametreler; SADECE veri ve cikti yollari
+farkli. v1 dosyalarina (ce_fold*.pt, ce_oof*, sub_*) kesinlikle dokunmaz.
+
+- Girdi : artifacts/train_dataset_v5.parquet
+- Cikti : models/ce_v5_fold{i}.pt, artifacts/ce_v5_oof.npz,
+          artifacts/ce_v5_proxy_scores.npz
+- Resumable: checkpoint/oof/proxy dosyasi varsa o adim atlanir.
+- OOF raporu iki parcali: gercek etiketli satirlar (pos/annvet/v1neg) ayri,
+  pseudo satirlar (pl_pos/pl_neg) ayri - pseudo tarafi "uyum", metrik degil.
+"""
+import gc
+import time
+
+import numpy as np
+import pandas as pd
+import torch
+from sklearn.model_selection import GroupKFold
+from sklearn.metrics import f1_score
+from torch.utils.data import DataLoader
+from transformers import (AutoModelForSequenceClassification,
+                          get_linear_schedule_with_warmup)
+
+import config as C
+import eval_proxy
+from train_ce import TokenCache, PairDataset, collate, score_pairs
+
+DEVICE = "cuda"
+
+
+def train_fold_v5(fold, tr_idx, data, cache):
+    t_rows, i_rows, labels = data
+    ckpt = C.MODELS_DIR / f"ce_v5_fold{fold}.pt"
+
+    model = AutoModelForSequenceClassification.from_pretrained(
+        C.CE_MODEL_NAME, num_labels=1, cache_dir=C.HF_CACHE).to(DEVICE)
+
+    if ckpt.exists():
+        print(f"fold {fold}: checkpoint mevcut, egitim atlaniyor")
+        model.load_state_dict(torch.load(ckpt, map_location=DEVICE,
+                                         weights_only=True))
+        return model
+
+    ds_tr = PairDataset(t_rows[tr_idx], i_rows[tr_idx], labels[tr_idx], cache)
+    dl = DataLoader(ds_tr, batch_size=C.CE_BATCH_SIZE, shuffle=True,
+                    num_workers=0, collate_fn=lambda b: collate(b, cache.pad_id),
+                    pin_memory=True, drop_last=True)
+
+    steps_per_epoch = len(dl) // C.CE_GRAD_ACCUM
+    total_steps = steps_per_epoch * C.CE_EPOCHS
+    opt = torch.optim.AdamW(model.parameters(), lr=C.CE_LR,
+                            weight_decay=C.CE_WEIGHT_DECAY)
+    sched = get_linear_schedule_with_warmup(
+        opt, int(total_steps * C.CE_WARMUP_RATIO), total_steps)
+    loss_fn = torch.nn.BCEWithLogitsLoss()
+
+    print(f"fold {fold}: {len(ds_tr)} ornek, {total_steps} optimizer adimi")
+    model.train()
+    t0 = time.time()
+    step = 0
+    for epoch in range(C.CE_EPOCHS):
+        running, nrun = 0.0, 0
+        for b, (ids, tt, am, ys) in enumerate(dl):
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                logits = model(input_ids=ids.to(DEVICE, non_blocking=True),
+                               token_type_ids=tt.to(DEVICE, non_blocking=True),
+                               attention_mask=am.to(DEVICE, non_blocking=True)
+                               ).logits.squeeze(-1)
+                loss = loss_fn(logits.float(), ys.to(DEVICE)) / C.CE_GRAD_ACCUM
+            loss.backward()
+            running += loss.item() * C.CE_GRAD_ACCUM
+            nrun += 1
+            if (b + 1) % C.CE_GRAD_ACCUM == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+                sched.step()
+                opt.zero_grad(set_to_none=True)
+                step += 1
+                if step % 500 == 0:
+                    print(f"  fold {fold} e{epoch} step {step}/{total_steps} "
+                          f"loss={running/nrun:.4f} ({time.time()-t0:.0f}s)",
+                          flush=True)
+                    running, nrun = 0.0, 0
+    torch.save({k: v.half() for k, v in model.state_dict().items()}, ckpt)
+    print(f"fold {fold} egitildi ve kaydedildi ({time.time()-t0:.0f}s)")
+    return model
+
+
+def main():
+    torch.manual_seed(C.SEED)
+    cache = TokenCache()
+
+    ds = pd.read_parquet(C.ARTIFACTS_DIR / "train_dataset_v5.parquet")
+    t_rows = ds["term_id"].map(cache.t_index).values.astype(np.int64)
+    i_rows = ds["item_id"].map(cache.i_index).values.astype(np.int64)
+    labels = ds["label"].values.astype(np.float32)
+    groups = ds["term_id"].values
+    real_mask = ds["source"].isin(["pos", "annvet", "v1neg"]).values
+
+    proxy = pd.read_parquet(C.ARTIFACTS_DIR / "proxy_lists.parquet")
+    p_t = proxy["term_id"].map(cache.t_index).values.astype(np.int64)
+    p_i = proxy["item_id"].map(cache.i_index).values.astype(np.int64)
+
+    gkf = GroupKFold(n_splits=C.CE_N_FOLDS)
+    oof = np.zeros(len(ds), dtype=np.float32)
+    proxy_scores = np.zeros(len(proxy), dtype=np.float32)
+
+    for fold, (tr_idx, va_idx) in enumerate(gkf.split(t_rows, labels, groups)):
+        model = train_fold_v5(fold, tr_idx, (t_rows, i_rows, labels), cache)
+
+        oof_path = C.ARTIFACTS_DIR / f"ce_v5_oof_fold{fold}.npy"
+        if oof_path.exists():
+            oof[va_idx] = np.load(oof_path)
+        else:
+            oof[va_idx] = score_pairs(model, t_rows[va_idx], i_rows[va_idx],
+                                      cache, desc=f"oof f{fold}")
+            np.save(oof_path, oof[va_idx])
+        vm = real_mask[va_idx]
+        f1_real = f1_score(labels[va_idx][vm], (oof[va_idx][vm] > 0.5).astype(int),
+                           average="macro")
+        agree = ((oof[va_idx][~vm] > 0.5) == (labels[va_idx][~vm] > 0.5)).mean()
+        print(f"fold {fold} OOF macro_f1@0.5 = {f1_real:.4f} (gercek etiketler)  "
+              f"pseudo-uyum={agree:.4f}")
+
+        pr_path = C.ARTIFACTS_DIR / f"ce_v5_proxy_fold{fold}.npy"
+        if pr_path.exists():
+            proxy_scores += np.load(pr_path) / C.CE_N_FOLDS
+        else:
+            pr = score_pairs(model, p_t, p_i, cache, desc=f"proxy f{fold}")
+            np.save(pr_path, pr)
+            proxy_scores += pr / C.CE_N_FOLDS
+
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    np.savez(C.ARTIFACTS_DIR / "ce_v5_oof.npz", oof=oof, y=labels,
+             term_id=ds["term_id"].values, item_id=ds["item_id"].values,
+             source=ds["source"].values)
+    np.savez(C.ARTIFACTS_DIR / "ce_v5_proxy_scores.npz", scores=proxy_scores,
+             y=proxy["label"].values, term_id=proxy["term_id"].values)
+
+    eval_proxy.report("CE v5 OOF (gercek etiketli kisim)",
+                      labels[real_mask], oof[real_mask])
+    eval_proxy.report("CE v5 LB-proxy", proxy["label"].values, proxy_scores)
+    # onceki iterasyonlarla dogrudan kiyas
+    v1p = np.load(C.ARTIFACTS_DIR / "ce_proxy_scores.npz")
+    eval_proxy.report("(kiyas) CE v1 LB-proxy", v1p["y"], v1p["scores"])
+    v2p = np.load(C.ARTIFACTS_DIR / "ce_v2_proxy_scores.npz")
+    eval_proxy.report("(kiyas) CE v2 LB-proxy", v2p["y"], v2p["scores"])
+
+
+if __name__ == "__main__":
+    main()
