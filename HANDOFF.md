@@ -213,3 +213,40 @@ oturumundur; asagidaki cerceve onerilir:**
 3. `sub_v67blend_rate25.csv` (varsa +0.2·v3) — cesitlilik etkisi.
 4. Kalan haklar: typo-duzeltme rescore'unun v6 uzerine uygulanmasi
    (`rescore_typofix.py` deseni) ve `sub_ens_v234_typofix_rate25.csv`in bekleyen sonucu.
+
+## 8) v6/v7 LB sonuclari ve v8: LLM hakem (2026-07-10)
+
+### Sonuclar ve KESIN TANI
+- `sub_v6_rate25.csv` = **0.855** (yeni rekor; onceki 0.851)
+- `sub_v7_rate25.csv` = 0.852 (yeni-ogretmen pseudo dongusu GERI GITTI)
+- Kanit zinciri: model sinifi atlamasi (110M->568M, alaka on-egitimli) sadece
+  +0.004; pseudo dongusu -0.003; mimari ensemble daha once +0.000.
+  SONUC: tavan MODEL degil ETIKET. Tum modeller ayni etiket soyundan
+  (250K gercek pozitif + sentetik/pseudo negatif) ogreniyor; gri bolgede
+  (skor 0.05-0.95, ~%7 = ~250K cift) hepsi AYNI hatayi yapiyor. Gercek
+  negatif etiket HIC olmadi. 0.855 -> 0.92 icin etiket soyundan BAGIMSIZ
+  bilgi kaynagi sart.
+
+### v8 yontemi: yerel LLM hakem (API'siz, A100'de bedava)
+- `src/llm_judge_v8.py` — iki asama:
+  - `judge --tag v6`: v6 skorlarindan gri bolgeyi secer (cap 400K, karar
+    esigine yakin oncelikli), Qwen2.5-32B-Instruct-AWQ (vLLM) ile her cifti
+    Evet/Hayir yargilar; P(Evet) ilk-token logprob'lardan cikar. 20K'lik
+    chunk'lar Drive'a yazilir -> resumable. `--limit 120` = goz kontrolu
+    (dosya yazmaz). Model `TK2_LLM` env ile degisir (hiz: 14B-AWQ).
+  - `merge --tag v6 --alpha 0.7`: gri bolgede skor = alpha*LLM + (1-alpha)*CE,
+    kesim SABIT %25 pozitif SAYISI (839.920). Cikti:
+    `sub_v6_llm{70,100}_rate25.csv`.
+- `notebooks/colab_v8_llm.ipynb` — bagimsiz surucu (taze runtime ister;
+  vLLM kurulumu torch'u degistirebilir, v6 hucreleriyle ayni oturumda
+  KARISTIRMA). Sure A100: kurulum+indirme ~10 dk, yargilama ~1.5-3 saat.
+- Submission sirasi: once alpha 0.7 (temkinli), yukselirse alpha 1.0.
+
+### v8 sonrasi yol haritasi
+- LB yukselirse v9: LLM etiketleriyle (gri bolge) + guvenli mevcut
+  etiketlerle CE'yi yeniden egit (etiket kalitesini kokten duzeltir);
+  ayrica LLM hakemi typo-duzeltilmis sorgularla tekrar kosturmak ucuz.
+- LB yukselMEZse: LLM kararlarinin ornek incelemesi (limit ciktisi) yol
+  gosterir — prompt mu zayif, model mi kucuk, yoksa gri bolge etiketleri
+  zaten mi dogru (o zaman tavan veri kalitesinde degil metrik yapisindadir;
+  sirada terim-bazli kalibrasyon probe'u var).
