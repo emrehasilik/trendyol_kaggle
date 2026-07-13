@@ -21,6 +21,10 @@ Kullanim (Colab, A100):
   python llm_judge_v8.py judge --tag v6 --limit 120   # once goz kontrolu
   python llm_judge_v8.py judge --tag v6               # tam kosu (resumable)
   python llm_judge_v8.py merge --tag v6 --alpha 0.7   # submission
+Cok tur: --name yeni tur icin ayri dosya adi, --exclude onceki turlarin
+ciftlerini atlar; merge --names ile turlar birlesir. Ornek 2. tur:
+  judge --tag v6 --name v6r2 --lo 0.02 --hi 0.98 --exclude v6
+  merge --tag v6 --names v6,v6r2 --alpha 1.0 --suffix r2
 Model TK2_LLM env ile secilir (vars. Qwen2.5-32B-Instruct-AWQ; hiz gerekirse
 Qwen/Qwen2.5-14B-Instruct-AWQ).
 """
@@ -104,13 +108,18 @@ def load_pair_texts(idx):
 
 def run_judge(args):
     t0 = time.time()
+    name = args.name or args.tag
     s = np.load(scores_path(args.tag))
-    ip = idx_path(args.tag)
+    ip = idx_path(name)
     if ip.exists() and not args.limit:
         idx = np.load(ip)
         print(f"secim mevcut: {len(idx)} cift ({ip.name})")
     else:
         idx = select_gray(s, args.lo, args.hi, args.cap, args.rate)
+        for ex in [e for e in args.exclude.split(",") if e]:
+            before = len(idx)
+            idx = np.setdiff1d(idx, np.load(idx_path(ex)))
+            print(f"  {ex} turunda yargilanmis {before - len(idx)} cift atlandi")
         print(f"gri bolge ({args.lo}-{args.hi}): {len(idx)} cift "
               f"(testin %{100 * len(idx) / len(s):.1f}'i)")
         if not args.limit:
@@ -141,7 +150,7 @@ def run_judge(args):
     n_chunks = (n + JCHUNK - 1) // JCHUNK
     thr0 = float(np.quantile(s, 1.0 - args.rate))
     for k in range(n_chunks):
-        cp = chunk_path(args.tag, k)
+        cp = chunk_path(name, k)
         if not args.limit and cp.exists():
             print(f"chunk {k + 1}/{n_chunks} mevcut, atlaniyor")
             continue
@@ -168,17 +177,28 @@ def run_judge(args):
     print(f"judge tamam ({(time.time() - t0) / 60:.0f} dk)")
 
 
+def load_judgments(name):
+    """Bir turun tum chunk'larini yukle -> (idx, p)."""
+    idx = np.load(idx_path(name))
+    n_chunks = (len(idx) + JCHUNK - 1) // JCHUNK
+    missing = [k for k in range(n_chunks) if not chunk_path(name, k).exists()]
+    assert not missing, f"{name}: eksik chunk'lar {missing} — once judge'i bitir"
+    parts = [np.load(chunk_path(name, k)) for k in range(n_chunks)]
+    jidx = np.concatenate([q["idx"] for q in parts])
+    jp = np.concatenate([q["p"].astype(np.float32) for q in parts])
+    assert np.array_equal(jidx, idx), f"{name}: chunk idx'leri secimle uyusmuyor"
+    return jidx, jp
+
+
 def run_merge(args):
     s = np.load(scores_path(args.tag))
     n = len(s)
-    idx = np.load(idx_path(args.tag))
-    n_chunks = (len(idx) + JCHUNK - 1) // JCHUNK
-    missing = [k for k in range(n_chunks) if not chunk_path(args.tag, k).exists()]
-    assert not missing, f"eksik chunk'lar: {missing} — once judge'i bitir"
-    parts = [np.load(chunk_path(args.tag, k)) for k in range(n_chunks)]
-    jidx = np.concatenate([q["idx"] for q in parts])
-    jp = np.concatenate([q["p"].astype(np.float32) for q in parts])
-    assert np.array_equal(jidx, idx), "chunk idx'leri secimle uyusmuyor"
+    names = [nm for nm in (args.names or args.tag).split(",") if nm]
+    pairs = [load_judgments(nm) for nm in names]
+    jidx = np.concatenate([p[0] for p in pairs])
+    jp = np.concatenate([p[1] for p in pairs])
+    assert len(np.unique(jidx)) == len(jidx), "turlar arasi cift tekrar yargilanmis"
+    idx = jidx
 
     merged = s.copy()
     merged[idx] = args.alpha * jp + (1.0 - args.alpha) * s[idx]
@@ -196,8 +216,9 @@ def run_merge(args):
     changed = int((pred != pred0).sum())
 
     ids = pd.read_csv(C.SUBMISSION_PAIRS_CSV, usecols=["id"], dtype=str)["id"]
-    out = (C.OUTPUT_DIR /
-           f"sub_{args.tag}_llm{int(args.alpha * 100)}_rate{int(args.rate * 100)}.csv")
+    suffix = f"_{args.suffix}" if args.suffix else ""
+    out = (C.OUTPUT_DIR / f"sub_{args.tag}_llm{int(args.alpha * 100)}"
+                          f"_rate{int(args.rate * 100)}{suffix}.csv")
     pd.DataFrame({"id": ids, "prediction": pred}).to_csv(out, index=False)
     print(f"yargilanan={len(idx)}  LLM-CE karar farki=%{100 * dis:.1f}  "
           f"degisen tahmin={changed} (%{100 * changed / n:.2f})")
@@ -214,6 +235,10 @@ def main():
     ap.add_argument("--cap", type=int, default=400_000)
     ap.add_argument("--alpha", type=float, default=0.7)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--name", default="")     # judge: bu turun dosya adi (vars. tag)
+    ap.add_argument("--exclude", default="")  # judge: bu turlardan cikanlari atla
+    ap.add_argument("--names", default="")    # merge: birlestirilecek turlar (vars. tag)
+    ap.add_argument("--suffix", default="")   # merge: cikti dosya adi eki
     args = ap.parse_args()
     (run_judge if args.mode == "judge" else run_merge)(args)
 

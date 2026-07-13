@@ -250,3 +250,29 @@ oturumundur; asagidaki cerceve onerilir:**
   gosterir — prompt mu zayif, model mi kucuk, yoksa gri bolge etiketleri
   zaten mi dogru (o zaman tavan veri kalitesinde degil metrik yapisindadir;
   sirada terim-bazli kalibrasyon probe'u var).
+
+## 9) v8 SONUC + tur 2 + v9 plani (2026-07-13)
+
+### v8 LB sonucu: HIPOTEZ DOGRULANDI
+- `sub_v6_llm70_rate25.csv` = **0.860**, `sub_v6_llm100_rate25.csv` = **0.861** (rekor).
+- Sadece 141K cift (%4.2, gri bolge 0.05-0.95) yargilandi ve +0.006 geldi;
+  alpha1.0 > alpha0.7 -> gri bolgede LLM'e TAM guven dogru, CE orada gurultu.
+- Etiket-soyu tanisi kesinlesti: bagimsiz bilgi kaynagi (LLM dunya bilgisi)
+  model buyutmenin 1.5 kati kazandirdi.
+
+### Sonraki hamleler (kod hazir, notebook hucre 11-15)
+- **Tur 2** (`--name v6r2 --lo 0.02 --hi 0.98 --exclude v6`): bant genisletildi,
+  yalniz yeni ciftler yargilanir (~30-60 dk); merge `--names v6,v6r2 --suffix r2`
+  -> `sub_v6_llm100_rate25_r2.csv`.
+- **v9 retrain** (`build_dataset_v9.py --names v6,v6r2`): v5 tabani AYNEN +
+  LLM etiketli ciftler x3 tekrar (soft etiket; 0.3<p<0.7 kararsizlar atilir).
+  v7-tarzi v6-pseudo KATILMAZ (ayni soy, kanitlanmis sifir katki). Egitim
+  `train_ce_v6.py --data train_dataset_v9.parquet --tag v9` (~4-6 saat) ->
+  `sub_v9_rate25.csv` (retrain etkisi izole) -> v9 gri bolgesi yargilanir
+  (`--tag v9 --name v9 --exclude v6,v6r2`) + merge `--names v6,v6r2,v9`
+  -> `sub_v9_llm100_rate25.csv` (ana aday).
+- Mantik: yargilanan ciftlerde LLM karari zaten kullaniliyor; v9'un katkisi
+  duzeltmeleri YARGILANMAMIS ciftlere genellestirmek. 0.92 yolu bu dongunun
+  tekrarindan geciyor (judge -> retrain -> yeni gri bolge -> judge ...).
+- Olcekleme secenekleri (gerekirse): 72B-AWQ hakem (A100-80GB sigar, ~2x yavas),
+  few-shot prompt, typo-suphelilerin dusuk-skorlu ciftlerini hedefli yargilama.
