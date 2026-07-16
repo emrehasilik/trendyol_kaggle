@@ -87,13 +87,9 @@ def p_yes(first_logprobs, gen_text):
     return 1.0 if g.startswith("evet") else 0.0 if g.startswith("hay") else 0.5
 
 
-def load_pair_texts(idx):
-    """Secilen ciftler icin (sorgu, zengin item metni) listeleri."""
+def pair_texts_from_ids(t_ids, i_ids):
+    """(term_id, item_id) dizileri icin (sorgu, zengin item metni) listeleri."""
     from tokenize_ce_cache_v6 import item_text_v6
-    sub = pd.read_csv(C.SUBMISSION_PAIRS_CSV, dtype=str)
-    t_ids = sub["term_id"].values[idx]
-    i_ids = sub["item_id"].values[idx]
-    del sub
     terms = pd.read_csv(C.TERMS_CSV, dtype=str, keep_default_na=False)
     q_of = dict(zip(terms["term_id"], terms["query"]))
     need = set(i_ids)
@@ -104,6 +100,34 @@ def load_pair_texts(idx):
             it_of[r.item_id] = item_text_v6(r.title, r.brand, r.category,
                                             r.gender, r.age_group, r.attributes)
     return [q_of[t] for t in t_ids], [it_of[i] for i in i_ids]
+
+
+def load_pair_texts(idx):
+    """Secilen test ciftleri icin (sorgu, item metni) listeleri."""
+    sub = pd.read_csv(C.SUBMISSION_PAIRS_CSV, dtype=str)
+    t_ids = sub["term_id"].values[idx]
+    i_ids = sub["item_id"].values[idx]
+    del sub
+    return pair_texts_from_ids(t_ids, i_ids)
+
+
+def make_llm():
+    """vLLM motoru + prompt kurucu + sampling parametreleri."""
+    from vllm import LLM, SamplingParams
+    llm = LLM(model=LLM_NAME, max_model_len=1024, gpu_memory_utilization=0.90,
+              enable_prefix_caching=True, download_dir=C.HF_CACHE)
+    tok = llm.get_tokenizer()
+    sp = SamplingParams(temperature=0.0, max_tokens=2, logprobs=20)
+
+    def build(q, it):
+        msgs = [{"role": "system", "content": SYSTEM},
+                {"role": "user",
+                 "content": f'Arama terimi: "{q}"\nÜrün: {it}\n\n'
+                            f'Bu ürün bu arama için alakalı mı?'}]
+        return tok.apply_chat_template(msgs, tokenize=False,
+                                       add_generation_prompt=True)
+
+    return llm, build, sp
 
 
 def run_judge(args):
@@ -131,20 +155,7 @@ def run_judge(args):
 
     queries, items = load_pair_texts(idx)
     print(f"metinler hazir ({time.time() - t0:.0f}s); LLM yukleniyor: {LLM_NAME}")
-
-    from vllm import LLM, SamplingParams
-    llm = LLM(model=LLM_NAME, max_model_len=1024, gpu_memory_utilization=0.90,
-              enable_prefix_caching=True, download_dir=C.HF_CACHE)
-    tok = llm.get_tokenizer()
-    sp = SamplingParams(temperature=0.0, max_tokens=2, logprobs=20)
-
-    def build(q, it):
-        msgs = [{"role": "system", "content": SYSTEM},
-                {"role": "user",
-                 "content": f'Arama terimi: "{q}"\nÜrün: {it}\n\n'
-                            f'Bu ürün bu arama için alakalı mı?'}]
-        return tok.apply_chat_template(msgs, tokenize=False,
-                                       add_generation_prompt=True)
+    llm, build, sp = make_llm()
 
     n = len(idx)
     n_chunks = (n + JCHUNK - 1) // JCHUNK

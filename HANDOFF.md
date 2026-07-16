@@ -276,3 +276,36 @@ oturumundur; asagidaki cerceve onerilir:**
   tekrarindan geciyor (judge -> retrain -> yeni gri bolge -> judge ...).
 - Olcekleme secenekleri (gerekirse): 72B-AWQ hakem (A100-80GB sigar, ~2x yavas),
   few-shot prompt, typo-suphelilerin dusuk-skorlu ciftlerini hedefli yargilama.
+
+## 10) v9 SONUC + v10 plani (2026-07-16)
+
+### v9 LB: dongu KANITLANDI
+- `sub_v9_rate25.csv` = **0.877** (retrain tek basina +0.010),
+  `sub_v9_llm100_rate25.csv` = **0.880** (v9 gri turu +0.003).
+- Seri: 0.851 -> v6 0.855 -> LLM r1 0.861 -> r2 0.867 -> v9 0.877 -> 0.880.
+- Yorum: LLM etiketleri egitime girince model duzeltmeleri YARGILANMAMIS
+  ciftlere genellestiriyor; kazancin buyugu retrain'den geliyor.
+
+### v10 (kod hazir, notebook hucre 16-21)
+1. **Tur 3** (`--tag v9 --name v9r2 --lo 0.01 --hi 0.99 --exclude v6,v6r2,v9`):
+   bant kiyilari + merge -> `sub_v9_llm100_rate25_r2.csv` (hizli kazanc).
+2. **Anchor denetimi** (`llm_audit_train.py`): annvet+v1neg sentetik
+   negatifleri (350K) LLM'e sorulur; p>=0.7 false-neg -> soft pozitif
+   (`_fix` source), 0.3-0.7 kararsiz atilir. Dosyalar `llm_tr_tr1_*`.
+3. **v10 dataseti** (`build_dataset_v10.py --names v6,v6r2,v9,v9r2 --audit tr1`):
+   v5 tabani + denetim duzeltmeleri + CELISKI TEMIZLIGI (LLM'in yargiladigi
+   ciftlerdeki eski pl_pos/pl_neg atilir) + tum LLM turlari x3 (soft).
+4. v10 egitim/skorlama (`--tag v10`) -> `sub_v10_rate25.csv` -> v10 gri
+   yargila + tum turlar merge -> `sub_v10_llm100_rate25.csv` (ana aday).
+5. **Oran probe**: merge `--rate 0.24 / 0.26` (GPU'suz) — %25 tepesi v3'le
+   haritalanmisti, dagilim degisti, yeniden dogrula.
+
+### Teknik notlar
+- `llm_judge_v8.py` refactor: `make_llm()` + `pair_texts_from_ids()` ortak;
+  audit scripti bunlari kullanir.
+- Kota: A100 compute unit bitti -> kullanici Pay-As-You-Go aldi. A100-40GB
+  geliyor artik (80 degil); 32B-AWQ hala sigar. L4/T4'e duserse 0. hucrede
+  `LLM="Qwen/Qwen2.5-14B-Instruct-AWQ"`.
+- vLLM kurulum tuzaklari cozuldu (hucre 6): uv --torch-backend=auto ile
+  zorla reinstall + libnvrtc.so.13 sistem yoluna symlink; gercek test
+  `from vllm import LLM` (duz `import vllm` tembel, yaniltir).
